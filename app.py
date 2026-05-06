@@ -214,6 +214,98 @@ def rechercher_api_medicament(nom: str) -> dict:
     except Exception:
         pass
     return None
+def rechercher_excel_direct(requete: str) -> tuple[str, str]:
+    """
+    Parcourt directement le fichier Excel en temps réel pour filtrer le médicament 
+    et extraire les rubriques correspondantes (utile si FAISS n'est pas encore indexé).
+    """
+    try:
+        excel_file = Path("Creation_agent_RAG/CIS_RCP_export.xlsx")
+        if not excel_file.exists():
+            return "", ""
+            
+        df = pd.read_excel(excel_file)
+        requete_lower = requete.lower()
+        
+        # Mots outils à ignorer pour extraire le médicament
+        mots_outils = {"quels", "sont", "les", "effets", "secondaires", "posologie", "contre", "indications", "composition", "avec", "dans", "pour", "prendre", "adulte", "enfant"}
+        words = [w.strip("?,.!") for w in requete_lower.split() if len(w) > 3 and w not in mots_outils]
+        
+        matching_rows = pd.DataFrame()
+        matched_word = ""
+        for word in words:
+            matches = df[df["denomination"].str.contains(word, case=False, na=False)]
+            if not matches.empty:
+                matching_rows = matches
+                matched_word = word
+                break
+                
+        if matching_rows.empty:
+            return "", ""
+            
+        sections_to_check = [
+            "composition", "forme_pharmaceutique", "indications", "posologie", 
+            "contre_indications", "mises_en_garde", "interactions", 
+            "grossesse_allaitement", "effets_indesirables", "surdosage", 
+            "excipients", "conditions_prescription"
+        ]
+        section_labels_dict = {
+            "composition": "Composition",
+            "forme_pharmaceutique": "Forme pharmaceutique",
+            "indications": "Indications thérapeutiques",
+            "posologie": "Posologie et mode d'administration",
+            "contre_indications": "Contre-indications",
+            "mises_en_garde": "Mises en garde et précautions d'emploi",
+            "interactions": "Interactions avec d'autres médicaments",
+            "grossesse_allaitement": "Grossesse, allaitement et fertilité",
+            "effets_indesirables": "Effets indésirables",
+            "surdosage": "Surdosage",
+            "excipients": "Liste des excipients",
+            "conditions_prescription": "Conditions de prescription et de délivrance"
+        }
+        
+        def clean_text_local(text):
+            if not isinstance(text, str): return ""
+            return text.replace("\x92", "'").replace("\x96", "-").strip()
+
+        # Sélectionner la notice la plus complète (texte le plus long)
+        matching_rows["total_len"] = matching_rows.apply(lambda r: sum(len(str(r.get(s, ""))) for s in sections_to_check), axis=1)
+        best_row = matching_rows.sort_values(by="total_len", ascending=False).iloc[0]
+        denomination = clean_text_local(best_row["denomination"])
+        
+        # Identifier quelle section est demandée sémantiquement
+        target_section = None
+        if "effet" in requete_lower or "indésirable" in requete_lower or "risque" in requete_lower:
+            target_section = "effets_indesirables"
+        elif "posologie" in requete_lower or "dose" in requete_lower or "prendre" in requete_lower:
+            target_section = "posologie"
+        elif "contre" in requete_lower or "interdit" in requete_lower:
+            target_section = "contre_indications"
+        elif "interaction" in requete_lower or "compatible" in requete_lower:
+            target_section = "interactions"
+        elif "composition" in requete_lower or "contient" in requete_lower:
+            target_section = "composition"
+            
+        results = []
+        if target_section and str(best_row.get(target_section, "")) != "nan":
+            content = clean_text_local(best_row[target_section])
+            results.append(
+                f"Source Directe Excel - Notice de {denomination} (Rubrique : {section_labels_dict[target_section]})\n"
+                f"Texte de la notice: {content[:2000]}"
+            )
+        else:
+            for sec in ["indications", "posologie", "effets_indesirables"]:
+                if str(best_row.get(sec, "")) != "nan":
+                    content = clean_text_local(best_row[sec])
+                    results.append(
+                        f"Source Directe Excel - Notice de {denomination} (Rubrique : {section_labels_dict[sec]})\n"
+                        f"Texte de la notice: {content[:1000]}"
+                    )
+                    
+        return "\n---\n".join(results), denomination
+    except Exception:
+        return "", ""
+
 
 # Charger la clé API Groq silencieusement
 api_key = os.getenv("GROQ_API_KEY")
@@ -262,11 +354,10 @@ if "resources_loaded" not in st.session_state:
 else:
     index, metadata, embedding_model = load_rag_resources()
 
-# Si l'index FAISS n'est pas encore généré
-if index is None:
-    st.error("❌ Base vectorielle introuvable !")
-    st.info("Veuillez d'abord exécuter le script d'indexation pour initialiser la base de données sémantique : `python3 indexation.py`")
-    st.stop()
+# Si l'index FAISS n'est pas encore généré, on passe en mode d'extraction directe Excel !
+is_vector_mode = index is not None
+if not is_vector_mode:
+    st.toast("💡 Mode d'extraction directe Excel actif (Base FAISS non indexée)", icon="ℹ️")
 
 # Barre latérale minimaliste (Uniquement pour effacer la conversation)
 with st.sidebar:
@@ -326,22 +417,23 @@ if prompt := st.chat_input("Comment puis-je vous aider aujourd'hui ?"):
         except Exception:
             question_recherche = prompt
 
-    # Recherche vectorielle FAISS sémantique
-    query_vector = embedding_model.encode([question_recherche], convert_to_numpy=True)
-    query_vector = np.array(query_vector, dtype=np.float32)
-    distances, indices = index.search(query_vector, K_VALUE)
-    
+    # Recherche vectorielle FAISS sémantique (uniquement si l'index est disponible)
     chunks_pertinents = []
-    for dist, idx in zip(distances[0], indices[0]):
-        if idx != -1 and idx < len(metadata):
-            chunk = metadata[idx]
-            # On n'ajoute que si la pertinence L2 est bonne (<= THRESHOLD_L2)
-            if dist <= THRESHOLD_L2:
-                chunks_pertinents.append({
-                    "contenu_original": chunk["contenu_original"],
-                    "metadata": chunk["metadata"],
-                    "distance": float(dist)
-                })
+    if is_vector_mode:
+        query_vector = embedding_model.encode([question_recherche], convert_to_numpy=True)
+        query_vector = np.array(query_vector, dtype=np.float32)
+        distances, indices = index.search(query_vector, K_VALUE)
+        
+        for dist, idx in zip(distances[0], indices[0]):
+            if idx != -1 and idx < len(metadata):
+                chunk = metadata[idx]
+                # On n'ajoute que si la pertinence L2 est bonne (<= THRESHOLD_L2)
+                if dist <= THRESHOLD_L2:
+                    chunks_pertinents.append({
+                        "contenu_original": chunk["contenu_original"],
+                        "metadata": chunk["metadata"],
+                        "distance": float(dist)
+                    })
             
     # Générer la réponse avec Groq
     with st.chat_message("assistant", avatar="🤖"):
@@ -365,8 +457,10 @@ if prompt := st.chat_input("Comment puis-je vous aider aujourd'hui ?"):
                 )
             contexte_text = "\n---\n".join(contexte_elements)
         else:
-            # Tenter une recherche sur l'API publique en temps réel
+            # Tenter d'abord une recherche sur l'API publique en temps réel
             api_record = rechercher_api_medicament(question_recherche)
+            excel_context = ""
+            excel_denomination = ""
             if api_record:
                 comp_list = []
                 for comp in api_record.get("composition", []):
@@ -380,14 +474,19 @@ if prompt := st.chat_input("Comment puis-je vous aider aujourd'hui ?"):
                     f"Conditions de prescription et de délivrance: {', '.join(api_record.get('conditions', []))}\n"
                 )
             else:
-                contexte_text = "Aucune notice locale pertinente ni données API en temps réel trouvées pour cette question."
+                # Si l'API externe ne trouve rien ou est hors-ligne, faire le fallback direct Excel local en 0.1 seconde !
+                excel_context, excel_denomination = rechercher_excel_direct(question_recherche)
+                if excel_context:
+                    contexte_text = excel_context
+                else:
+                    contexte_text = "Aucune notice locale pertinente ni données API en temps réel ni correspondance Excel trouvées pour cette question."
             
         prompt_systeme = (
             "Vous êtes un médecin expert et un assistant d'information médicale chaleureux, humain et très professionnel.\n"
             "Votre rôle est d'accueillir l'utilisateur, de dialoguer courtoisement avec lui, de répondre à ses questions sur les médicaments et de le guider s'il présente des symptômes.\n\n"
             
             "CONSIGNES STRICTES DE COMPORTEMENT :\n"
-            "1. Si le contexte contient des extraits de notices sémantiquement proches (indiqués par des sources locales) ou des informations issues de l'API nationale en temps réel, répondez de manière extrêmement factuelle en vous basant sur ces extraits officiels et en citant les sources (ex: [Notice Doliprane - Posologie] ou [API ANSM - Composition]).\n"
+            "1. Si le contexte contient des extraits de notices sémantiquement proches (indiqués par des sources locales), des informations issues de l'API nationale en temps réel ou des données du fichier Excel en direct (Notice Excel), répondez de manière extrêmement factuelle en vous basant sur ces extraits officiels et en citant les sources (ex: [Notice Doliprane - Posologie] ou [API ANSM - Composition] ou [Notice Excel - Posologie]).\n"
             "2. Si l'utilisateur vous salue, vous décrit des symptômes ou vous pose des questions médicales générales (ex: le paludisme / palu) ou si aucune donnée officielle n'est trouvée pour un médicament, agissez comme un médecin bienveillant. "
             "Fournissez-lui des explications médicales claires, instructives et générales (ex: causes du paludisme, traitements généraux recommandés sur les sites de santé, comportement à adopter), "
             "et conseillez-lui chaleureusement de consulter un médecin.\n"
@@ -430,6 +529,13 @@ if prompt := st.chat_input("Comment puis-je vous aider aujourd'hui ?"):
                 sources_affichees.append({
                     "medicament": api_record.get("elementPharmaceutique"),
                     "section_label": "Base API Nationale Temps Réel"
+                })
+                
+            # Enregistrer la source du fichier Excel en direct s'il y en a une
+            if excel_context and not chunks_pertinents and not api_record:
+                sources_affichees.append({
+                    "medicament": excel_denomination,
+                    "section_label": "Extraction Directe Excel (Temps Réel)"
                 })
                     
             st.session_state.historique.append((prompt, reponse, sources_affichees))
