@@ -16,11 +16,20 @@ from sentence_transformers import SentenceTransformer
 from groq import Groq
 from dotenv import load_dotenv
 
+import warnings
+import logging
+
+# Supprimer silencieusement les avertissements techniques en arrière-plan
+warnings.filterwarnings("ignore")
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
 # Configuration
 INDEX_PATH = Path("faiss_index.bin")
 METADATA_PATH = Path("metadata.json")
 MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
-GROQ_MODEL = "llama3-8b-8192"  # Rapide et adapté au RAG
+GROQ_MODEL = "llama-3.1-8b-instant"  # Rapide et adapté au RAG
 
 # Charger le fichier .env
 load_dotenv()
@@ -128,36 +137,38 @@ def reformuler_question(client: Groq, question: str, historique: list) -> str:
 
 def generer_reponse(client: Groq, question: str, chunks_pertinents: list[dict], historique: list) -> str:
     """
-    Génère la réponse finale à l'aide de Groq en injectant les chunks comme contexte
-    et en appliquant scrupuleusement les consignes de sécurité médicale.
+    Génère la réponse finale à l'aide de Groq en agissant comme un médecin chaleureux et professionnel,
+    en se basant sur les notices si disponibles, ou sur des connaissances générales si absentes.
     """
-    # Assembler le contexte textuel pour le LLM
-    contexte_elements = []
-    for idx, chunk in enumerate(chunks_pertinents):
-        meta = chunk["metadata"]
-        contexte_elements.append(
-            f"Source #{idx+1} - Médicament: {meta['medicament']} ({meta['denomination']}) | "
-            f"Rubrique: {meta['section_label']} (Mise à jour: {meta['date_mise_a_jour']})\n"
-            f"Texte source: {chunk['contenu_original']}\n"
-        )
-    contexte_text = "\n---\n".join(contexte_elements)
+    # Assembler le contexte s'il y a des notices
+    if chunks_pertinents:
+        contexte_elements = []
+        for idx, chunk in enumerate(chunks_pertinents):
+            meta = chunk["metadata"]
+            contexte_elements.append(
+                f"Source #{idx+1} - Médicament: {meta['medicament']} ({meta['denomination']}) | "
+                f"Rubrique: {meta['section_label']} (Mise à jour: {meta['date_mise_a_jour']})\n"
+                f"Texte source: {chunk['contenu_original']}\n"
+            )
+        contexte_text = "\n---\n".join(contexte_elements)
+    else:
+        contexte_text = "Aucune notice locale pertinente trouvée dans la base de connaissances pour cette question."
     
     prompt_systeme = (
-        "Vous êtes un assistant médical expert d'information sur les médicaments.\n"
-        "Votre tâche est de répondre de manière précise, rigoureuse et claire à la question posée par l'utilisateur, "
-        "en utilisant UNIQUEMENT les sources textuelles fournies dans le contexte ci-dessous.\n\n"
+        "Vous êtes un médecin expert et un assistant d'information médicale chaleureux, humain et très professionnel.\n"
+        "Votre rôle est d'accueillir l'utilisateur, de dialoguer courtoisement avec lui, de répondre à ses questions sur les médicaments et de le guider s'il présente des symptômes.\n\n"
         
-        "RÈGLES ABSOLUES À RESPECTER :\n"
-        "1. Vous devez obligatoirement inclure EXACTEMENT cette mention à la toute fin de votre réponse, sur sa propre ligne :\n"
+        "CONSIGNES STRICTES DE COMPORTEMENT :\n"
+        "1. Si le contexte contient des extraits de notices sémantiquement proches (indiqués par des sources valides), "
+        "répondez de manière extrêmement factuelle en vous basant sur ces extraits officiels et en citant explicitement les notices "
+        "(ex: [Notice Doliprane - Posologie] ou 'Selon la notice officielle du Doliprane...').\n"
+        "2. Si l'utilisateur vous salue, vous parle de sa santé en général, vous décrit des maladies (ex: le paludisme / palu) ou des symptômes "
+        "pour lesquels il n'y a pas de notice correspondante dans le contexte, agissez comme un médecin bienveillant. "
+        "Fournissez-lui des explications médicales claires, instructives et générales (ex: causes du paludisme, traitements généraux recommandés sur les sites de santé, comportement à adopter), "
+        "et conseillez-lui chaleureusement de consulter un médecin.\n"
+        "3. Vous devez obligatoirement ajouter EXACTEMENT la mention suivante à la toute fin de votre réponse, sur sa propre ligne :\n"
         "   \"**Ces informations ne remplacent pas l'avis d'un professionnel de santé. En cas de doute, consultez votre médecin ou votre pharmacien.**\"\n"
-        "2. Vous devez indiquer clairement de quel médicament et de quelle rubrique provient chaque information clé présentée dans votre réponse "
-        "(ex: [Notice Doliprane - Posologie] ou 'Selon la notice officielle du Doliprane (rubrique Posologie)...').\n"
-        "3. Si l'information demandée n'est pas dans les sources fournies ou si la question dépasse le périmètre des médicaments indexés, "
-        "vous devez obligatoirement déclarer explicitement : \"Je ne trouve pas cette information dans ma base de connaissances.\" "
-        "Ne tentez jamais d'inventer, d'extrapoler ou d'utiliser des connaissances externes.\n"
-        "4. Soyez courtois, neutre et professionnel.\n\n"
-        
-        f"Contexte des notices officielles :\n{contexte_text}"
+        "4. Soyez toujours bienveillant, rassurant, précis et rigoureux. Ne dites jamais 'Je ne trouve pas l'information dans ma base' pour de simples salutations ou pour des questions médicales générales sur des maladies; expliquez la maladie sémantiquement en agissant comme un médecin traitant."
     )
     
     messages = [{"role": "system", "content": prompt_systeme}]
@@ -173,7 +184,7 @@ def generer_reponse(client: Groq, question: str, chunks_pertinents: list[dict], 
         response = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            temperature=0.1  # Faible température pour maximiser la fidélité au contexte
+            temperature=0.25  # Température légèrement plus élevée pour un dialogue fluide et naturel
         )
         return response.choices[0].message.content.strip()
     except Exception as e:
@@ -220,23 +231,11 @@ def main():
             # 2. Recherche vectorielle
             chunks_pertinents = rechercher(question_recherche, embedding_model, index, chunks_with_meta, k=4)
             
-            if not chunks_pertinents:
-                print("⚠️ Aucun résultat trouvé dans la base de données.")
-                continue
-                
-            # Bonus B : Évaluation du score de confiance (distance L2)
-            # Pour paraphrase-multilingual-mpnet-base-v2 avec distance FlatL2 :
-            # - distance < 12-15 : excellente similarité sémantique.
-            # - distance > 25-30 : très éloigné, probablement hors sujet.
-            best_distance = chunks_pertinents[0]["distance"]
-            if best_distance > 24.0:
-                print("\n⚠️ [Note] La question semble hors de ma base de connaissances des médicaments courants.")
-                print("Je ne trouve pas cette information dans ma base de connaissances.")
-                print("\n**Ces informations ne remplacent pas l'avis d'un professionnel de santé. En cas de doute, consultez votre médecin ou votre pharmacien.**")
-                continue
+            # Filtrer les chunks sémantiquement proches
+            chunks_valides = [c for c in chunks_pertinents if c["distance"] <= 24.0]
             
             # 3. Génération de la réponse avec Groq
-            reponse = generer_reponse(client, question, chunks_pertinents, historique)
+            reponse = generer_reponse(client, question, chunks_valides, historique)
             
             # 4. Affichage du résultat
             print("\n🤖 Réponse :")
@@ -247,10 +246,10 @@ def main():
             # Afficher les sources sémantiques
             print("\n📄 Sources consultées :")
             seen_sources = set()
-            for chunk in chunks_pertinents:
+            for chunk in chunks_valides:
                 meta = chunk["metadata"]
                 source_id = f"{meta['medicament']} - {meta['section_label']}"
-                if source_id not in seen_sources and chunk["distance"] <= 24.0:
+                if source_id not in seen_sources:
                     seen_sources.add(source_id)
                     print(f" - Notice de {meta['denomination']} (Rubrique : {meta['section_label']}) [Score L2: {chunk['distance']:.2f}]")
             

@@ -15,33 +15,22 @@ import faiss
 from sentence_transformers import SentenceTransformer
 from tqdm import tqdm
 
+import warnings
+import logging
+
+# Supprimer silencieusement les avertissements techniques en arrière-plan
+warnings.filterwarnings("ignore")
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.ERROR)
+logging.getLogger("huggingface_hub").setLevel(logging.ERROR)
+
 # Configuration
 EXCEL_PATH = Path("Creation_agent_RAG/CIS_RCP_export.xlsx")
 INDEX_PATH = Path("faiss_index.bin")
 METADATA_PATH = Path("metadata.json")
 MODEL_NAME = "paraphrase-multilingual-mpnet-base-v2"
 
-# Liste des médicaments cibles du corpus avec leur nom canonique
-CORPUS_MAPPING = {
-    "doliprane": "Doliprane",
-    "dafalgan": "Dafalgan",
-    "efferalgan": "Efferalgan",
-    "ibuprofene": "Ibuprofène",
-    "advil": "Advil",
-    "nurofen": "Nurofen",
-    "aspirine": "Aspirine",
-    "aspegic": "Aspégic",
-    "amoxicilline": "Amoxicilline",
-    "augmentin": "Augmentin",
-    "smecta": "Smecta",
-    "imodium": "Imodium",
-    "ventoline": "Ventoline",
-    "becotide": "Bécotide",
-    "omeprazole": "Oméprazole",
-    "inexium": "Inexium",
-    "metformine": "Metformine",
-    "glucophage": "Glucophage"
-}
+
 
 # Sections de la notice à indexer
 SECTIONS_TO_INDEX = [
@@ -127,24 +116,23 @@ def chunker(texte: str, taille_max: int = 800, overlap: int = 150) -> list[str]:
 
 def prepare_documents(df: pd.DataFrame) -> list[dict]:
     """
-    Parcourt le dataframe des médicaments, filtre les cibles, dédouble par médicament canonique
+    Parcourt le dataframe des médicaments, dédoublonne par premier mot du libellé
     (en gardant la notice la plus complète) et prépare les chunks avec leurs métadonnées.
     """
-    print("Dédoublonnement et filtrage du corpus par médicament canonique...")
+    print("Dédoublonnement et filtrage global du corpus par molécule (premier mot)...")
     
     # 1. Associer chaque ligne à son médicament canonique et calculer la longueur totale de son texte
     valid_rows = []
     for _, row in df.iterrows():
         denomination = clean_text(row["denomination"])
-        
-        matched_medicament = None
-        denomination_lower = denomination.lower()
-        for key, canonical in CORPUS_MAPPING.items():
-            if key in denomination_lower:
-                matched_medicament = canonical
-                break
-                
-        if not matched_medicament:
+        if not denomination:
+            continue
+            
+        # Extraire le premier mot comme représentant de la molécule (nom de marque ou générique principal)
+        first_word = denomination.split()[0].strip().upper()
+        # Supprimer les caractères non-alphabétiques à la fin du mot
+        first_word = re.sub(r'[^A-Z0-9]', '', first_word)
+        if not first_word or len(first_word) < 2:
             continue
             
         # Calculer la longueur cumulée du texte de toutes les rubriques
@@ -152,19 +140,19 @@ def prepare_documents(df: pd.DataFrame) -> list[dict]:
         
         valid_rows.append({
             "row": row,
-            "medicament": matched_medicament,
+            "first_word": first_word,
             "total_length": total_length
         })
         
-    # 2. Regrouper par médicament canonique et sélectionner la notice la plus longue/complète
-    best_rows_by_drug = {}
+    # 2. Regrouper par premier mot et sélectionner la notice la plus longue/complète
+    best_rows_by_molecule = {}
     for item in valid_rows:
-        drug = item["medicament"]
-        if drug not in best_rows_by_drug or item["total_length"] > best_rows_by_drug[drug]["total_length"]:
-            best_rows_by_drug[drug] = item
+        mol = item["first_word"]
+        if mol not in best_rows_by_molecule or item["total_length"] > best_rows_by_molecule[mol]["total_length"]:
+            best_rows_by_molecule[mol] = item
             
-    selected_items = list(best_rows_by_drug.values())
-    print(f"-> {len(selected_items)} notices uniques et complètes sélectionnées pour le RAG.")
+    selected_items = list(best_rows_by_molecule.values())
+    print(f"-> {len(selected_items)} molécules uniques sélectionnées pour l'indexation globale.")
     
     # 3. Générer les chunks pour les notices sélectionnées
     documents = []
@@ -172,7 +160,7 @@ def prepare_documents(df: pd.DataFrame) -> list[dict]:
     
     for item in selected_items:
         row = item["row"]
-        matched_medicament = item["medicament"]
+        mol = item["first_word"]
         denomination = clean_text(row["denomination"])
         code_cis = str(row["code_cis"])
         date_mise_a_jour = clean_text(row["date_mise_a_jour"])
@@ -190,9 +178,9 @@ def prepare_documents(df: pd.DataFrame) -> list[dict]:
             for idx, chunk_content in enumerate(section_chunks):
                 chunk_id = f"doc_{code_cis}_{section}_{idx}"
                 
-                # Texte enrichi pour maximiser la pertinence vectorielle
+                # Texte enrichi pour maximiser la pertinence sémantique
                 enriched_content = (
-                    f"Médicament: {matched_medicament} ({denomination}) | "
+                    f"Médicament: {mol} ({denomination}) | "
                     f"Rubrique: {SECTION_LABELS[section]} | "
                     f"Contenu: {chunk_content}"
                 )
@@ -203,7 +191,7 @@ def prepare_documents(df: pd.DataFrame) -> list[dict]:
                     "contenu_original": chunk_content,
                     "metadata": {
                         "id": chunk_id,
-                        "medicament": matched_medicament,
+                        "medicament": mol,
                         "denomination": denomination,
                         "section": section,
                         "section_label": SECTION_LABELS[section],
@@ -213,7 +201,7 @@ def prepare_documents(df: pd.DataFrame) -> list[dict]:
                 })
                 chunk_count += 1
                 
-    print(f"-> Total de chunks générés après dédoublonnement : {chunk_count}")
+    print(f"-> Total de chunks générés pour la base complète : {chunk_count}")
     return documents
 
 def main():

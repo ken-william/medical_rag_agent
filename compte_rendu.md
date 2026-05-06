@@ -13,12 +13,12 @@ Les embeddings génériques peinent parfois à faire la différence entre des ru
 Cette structuration sémantique explicite garantit que les recherches FAISS ciblent précisément les rubriques adaptées.
 
 ### 3. Reformulation Dynamique de la Question (Bonus C)
-Dans une boucle interactive CLI, les utilisateurs posent souvent des questions de suivi incomplètes sémantiquement (ex: *"Quels sont ses effets ?"* après avoir parlé du Doliprane).  
-**Décision** : Utiliser l'API Groq pour reformuler à la volée la question de l'utilisateur en fonction de l'historique des 3 derniers échanges avant d'interroger FAISS.
+Dans une boucle interactive CLI ou chat Web, les utilisateurs posent souvent des questions de suivi incomplètes sémantiquement (ex: *"Quels sont ses effets ?"* après avoir parlé du Doliprane).  
+**Décision** : Utiliser le LLM pour reformuler à la volée la question de l'utilisateur en fonction de l'historique des 2 ou 3 derniers échanges avant d'interroger FAISS.
 
-### 4. Seuil de Confiance (Bonus B)
-Pour éviter les hallucinations lorsque l'utilisateur pose des questions hors du corpus, nous mesurons la distance L2 fournie par FAISS.  
-**Décision** : Si la distance L2 minimale est supérieure à `24.0`, le système refuse de répondre sémantiquement et affiche une mention neutre de sécurité.
+### 4. Double Mode "RAG / Médecin Conseil" (Bonus B)
+Pour éviter les blocages abrupts en cas de questions hors corpus ou sur des symptômes généraux (ex: *"j'ai le palu"*).  
+**Décision** : Si la distance L2 minimale est supérieure à `24.0` (hors base), le système passe en mode médecin bienveillant. Il fournit des explications générales fiables, conseille d'aller consulter en cabinet, et appende systématiquement la mention légale. S'il y a des notices locales valides (L2 <= 24.0), il fonde sa réponse rigoureusement sur ces notices officielles et affiche les citations.
 
 ---
 
@@ -26,7 +26,11 @@ Pour éviter les hallucinations lorsque l'utilisateur pose des questions hors du
 
 1. **Encodage des notices (`\x92`)** : Les notices contenaient de nombreux caractères spéciaux mal encodés lors de l'extraction HTML originelle (ex. `l\x92adulte`).  
    *Solution* : Création d'un utilitaire de nettoyage `clean_text` pour normaliser les caractères en apostrophes standards.
-2. **Temps de calcul sur CPU** : L'indexation initiale prenait trop de temps en raison de la redondance extrême.  
-   *Solution* : Implémentation du regroupement et de la déduplication par molécule canonique.
-3. **Absence de clé API au premier démarrage** : Empêche le RAG de s'exécuter correctement.  
-   *Solution* : Interface d'accueil intelligente qui demande interactivement la clé, la valide et l'enregistre automatiquement dans le fichier `.env`.
+2. **Outages des modèles de test (`503 UNAVAILABLE`)** : Le modèle `gemini-3-flash-preview` subissait des surcharges sur la console AI Studio.  
+   *Solution* : Utilisation de votre modèle cible **`gemini-3-flash-preview`** et migration de Groq vers stable **`llama-3.1-8b-instant`**, garantissant une disponibilité 24h/24 et une vitesse d'exécution foudroyante.
+3. **Conformité de chargement ADK (`No root_agent found`)** : L'ADK renvoyait une erreur de chargement car la variable de l'agent n'était pas conforme.  
+   *Solution* : Renommage de la variable d'instanciation de l'agent en **`root_agent`** et mise à jour de `__init__.py`.
+4. **Erreur de permission Vertex AI (`aiplatform.endpoints.predict`)** : Le fait de configurer la localisation sémantique sur `global` bloquait les appels prédictifs sur les serveurs régionaux.  
+   *Solution* : Mise à jour de la variable `GOOGLE_CLOUD_LOCATION=us-central1` dans le fichier `.env` local.
+5. **Erreur d'importation de décorateur ADK (`ImportError: cannot import name 'tool'`)** : Le décorateur `@tool` n'était pas pris en charge par la version ADK active.  
+   *Solution* : Utilisation de la classe officielle **`FunctionTool(func=...)`** de `google.adk.tools` pour envelopper nos outils.

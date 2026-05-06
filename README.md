@@ -1,6 +1,6 @@
 # 💊 Assistant Médicaments RAG
 
-Ce projet est un système de **RAG (Retrieval-Augmented Generation)** complet construit à partir de zéro (sans LangChain ni LlamaIndex) pour répondre de façon fiable et sécurisée à des questions sur un corpus de médicaments courants en utilisant **Groq (LLM Llama 3)** et **FAISS** pour la recherche vectorielle.
+Ce projet est un système de **RAG (Retrieval-Augmented Generation)** complet construit de bout en bout (sans LangChain ni LlamaIndex) pour répondre de façon fiable et chaleureuse à des questions sur un corpus de médicaments courants en utilisant **Groq (Llama 3.1)**, **Vertex AI (Gemini 2.5 Flash)** et **FAISS** pour la recherche vectorielle.
 
 ---
 
@@ -18,20 +18,20 @@ Cela renforce considérablement l'alignement sémantique lors de la recherche de
 Grâce au préfixage sémantique décrit en Q2, les termes "posologie", "effets indésirables" ou leurs synonymes sémantiques sont présents dans l'embedding calculé. Ainsi, une question comme *"Quels sont les risques du Doliprane ?"* s'alignera naturellement avec les vecteurs commençant par `Rubrique: Effets indésirables` ou `Rubrique: Contre-indications`. De plus, les métadonnées structurées stockées dans `metadata.json` nous permettent de tracer et de citer précisément la rubrique source dans l'interface utilisateur.
 
 ### **Q4. Gestion des questions multi-médicaments**
-Lorsqu'un utilisateur demande : *"Puis-je prendre du Doliprane et de l'ibuprofène en même temps ?"*, la recherche vectorielle extrait le `top-k` (ici $k=4$) des chunks les plus proches. L'embedding de la question contenant des termes liés aux deux molécules, FAISS récupère les sections d'interactions et de contre-indications des deux notices. Le LLM fusionne ensuite ces informations et fournit une analyse comparative sécurisée en citant chaque source séparément.
+Lorsqu'un utilisateur demande : *"Puis-je prendre du Doliprane et de l'ibuprofène en même temps ?"*, la recherche vectorielle extrait le `top-k` (ici $k=4$) des chunks les plus proches. L'embedding de la question contenant des termes liés aux deux molécules, FAISS récupère les sections d'interactions et de contre-indications des deux notices. Le LLM fusionne ensuite ces informations et fournit une analyse comparative en citant chaque source séparément.
 
 ### **Q5. Formulation du prompt système et prudence médicale**
-Le prompt système impose une rigueur absolue :
-1. **Mention légale obligatoire** en fin de réponse : *"Ces informations ne remplacent pas l'avis d'un professionnel de santé."*
-2. **Traçabilité stricte** : Citer le médicament et la rubrique pour chaque affirmation clé.
-3. **Garde-fou anti-hallucination** : Obligation de répondre *"Je ne trouve pas cette information dans ma base de connaissances."* si le score L2 dépasse le seuil de sécurité ou si les notices ne contiennent pas la réponse.
-4. **Basse température** (`temperature=0.1`) pour garantir des réponses déterministes et fidèles.
+Le prompt système configure l'assistant pour agir comme un **médecin de famille bienveillant** :
+1. **Mention légale obligatoire** en fin de réponse : *"Ces informations ne remplacent pas l'avis d'un professionnel de santé. En cas de doute, consultez votre médecin ou votre pharmacien."*
+2. **Traçabilité stricte** : Citer la notice officielle et la rubrique sémantique pour chaque affirmation issue de la base vectorielle locale.
+3. **Soutien médical général** : Si l'utilisateur pose des questions sur des maladies non indexées (ex: le paludisme) ou décrit des symptômes généraux, l'assistant fournit des conseils généraux fiables basés sur ses connaissances médicales, l'oriente chaleureusement vers un médecin, et évite de refuser de répondre de façon sèche.
+4. **Dialogue fluide** : Utilisation d'une température de `0.25` pour assurer un ton humain, empathique et naturel, tout en conservant une exactitude factuelle rigoureuse.
 
 ---
 
 ## ⚙️ Architecture du Système
 
-Le système est divisé en deux phases étanches :
+Le système est divisé en deux phases :
 
 ```mermaid
 flowchart TD
@@ -43,24 +43,22 @@ flowchart TD
         C --> F[(Métadonnées : metadata.json)]
     end
 
-    subgraph RAG [Phase 2 : RAG Interactif]
-        G[Question Utilisateur] --> H[LLM Groq : Reformulation via Historique]
+    subgraph RAG [Phase 2 : RAG & Médecin Virtuel]
+        G[Question / Salutations / Symptômes] --> H[LLM Groq : Reformulation via Historique]
         H --> I[Question Optimisée]
-        I --> J[Embedding de la Question]
-        J --> K[Recherche Vectorielle FAISS L2]
-        K --> L[Vérification du Seuil de Confiance Score L2]
-        L -->|Hors-Sujet / Seuil Dépassé| M[Refus de répondre sécurisé]
-        L -->|Valide / Top-4 Chunks| N[LLM Groq : Llama 3 Synthèse & Disclaimer]
-        N --> O[Réponse finale avec citations & sources]
+        I --> J[Recherche Vectorielle FAISS L2]
+        J --> K[Filtrage des Chunks avec Seuil L2 <= 24.0]
+        K -->|Aucun Chunk Valide / Symptômes| L[Mode Médecin Conseil : Conseils Généraux & Disclaimer]
+        K -->|Chunks Valides / Notices| M[Mode RAG Grounding : Synthèse des Notices, Citations & Disclaimer]
     end
 ```
 
 ---
 
-## 🚀 Lancement du Projet
+## 🚀 Lancement et Utilisation du Projet
 
-### 1. Prérequis
-Créez et activez votre environnement virtuel, puis installez les dépendances :
+### 1. Prérequis & Dépendances
+Créez et activez votre environnement virtuel, puis installez les dépendances requises :
 ```bash
 python3 -m venv venv
 source venv/bin/activate
@@ -68,22 +66,28 @@ pip install -r requirements.txt --index-url https://pypi.org/simple
 ```
 
 ### 2. Ingestion & Indexation (Phase 1)
-Exécutez le script d'indexation pour créer la base vectorielle :
+Exécutez le script d'indexation pour créer la base vectorielle en 15 secondes :
 ```bash
 python3 indexation.py
 ```
-*Note : Le script filtre les 18 médicaments cibles, conserve la notice la plus complète pour chacun d'eux afin d'éliminer les redondances, et génère 842 chunks pertinents en moins de 15 secondes.*
 
-### 3. Assistant RAG (Phase 2)
-Lancez l'assistant interactif :
+### 3. Lancement de l'Interface Graphique Streamlit Premium
+Démarrez la superbe interface graphique Web "style Gemini" (sans réglages distrayants, clé API lue silencieusement depuis le fichier `.env` local) :
 ```bash
-python3 rag.py
+venv/bin/streamlit run app.py
 ```
-Si aucune variable `GROQ_API_KEY` n'est détectée dans votre environnement ou votre fichier `.env`, l'assistant vous demandera de la saisir de manière sécurisée et l'enregistrera automatiquement dans un fichier `.env` local.
+👉 *L'interface est accessible sur http://localhost:8501*
+
+### 4. Lancement de l'Agent Officiel Google ADK
+Lancez l'interface graphique officielle de chat ADK avec votre agent configuré sous le modèle **`gemini-3-flash-preview`** :
+```bash
+venv/bin/adk web
+```
+👉 *L'interface officielle ADK est accessible sur http://localhost:8000*
 
 ---
 
 ## 🌟 Améliorations Implémentées (Bonus)
 
-1. **Bonus A & C - Gestion de l'historique & Reformulation** : Le système conserve l'historique de la session. Avant la recherche FAISS, il utilise le LLM pour reformuler la question actuelle en fonction du contexte (ex: transformer *"et ses effets secondaires ?"* en *"quels sont les effets indésirables de l'ibuprofène ?"*).
-2. **Bonus B - Score de confiance sémantique** : Nous mesurons la distance L2 retournée par FAISS. Si le score le plus proche est supérieur à `24.0` (distance sémantique trop élevée), le système indique poliment qu'il n'a pas l'information pour éviter toute hallucination hors-sujet.
+1. **Bonus A & C - Historique & Reformulation Contextuelle** : L'historique des conversations est géré sous le capot. L'assistant reformule à la volée les questions incomplètes (ex: *"quels sont ses effets ?"* devient *"quels sont les effets secondaires du paracétamol ?"*) pour assurer le succès de la recherche FAISS.
+2. **Bonus B - Mode Médecin Hybride (Score de Confiance)** : Si la distance L2 de FAISS dépasse `24.0` (hors base), l'agent passe en mode médecin de famille. Il fournit des explications bienveillantes sur les maladies (ex: le paludisme) ou symptômes, sans bloquer de façon abrupte, tout en garantissant la sécurité légale avec la mention obligatoire.

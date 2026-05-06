@@ -6,3 +6,7 @@ python-dotenv
 pandas
 openpyxl
 tqdm
+streamlit
+torchvision
+
+
